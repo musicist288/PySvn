@@ -324,6 +324,45 @@ class CommonClient(svn.common_base.CommonBase):
                 revision=revision
             )
 
+    def __iter_list(self, list_):
+        for entry in list_:
+            entry_attr = entry.attrib
+
+            kind = entry_attr['kind']
+            name = entry.find('name').text
+
+            size = entry.find('size')
+
+            # This will be None for directories.
+            if size is not None:
+                size = int(size.text)
+
+            commit_node = entry.find('commit')
+
+            author = commit_node.find('author').text
+            date = dateutil.parser.parse(commit_node.find('date').text)
+
+            commit_attr = commit_node.attrib
+            revision = int(commit_attr['revision'])
+
+# TODO(dustin): Convert this to a namedtuple in the next version.
+            yield {
+                'kind': kind,
+
+                # To decouple people from the knowledge of the value.
+                'is_directory': kind == svn.constants.K_DIR,
+
+                'name': name,
+                'size': size,
+                'author': author,
+                'date': date,
+
+                # Our approach to normalizing a goofy field-name.
+                'timestamp': date,
+
+                'commit_revision': revision,
+            }
+
     def list(self, extended=False, rel_path=None):
         full_url_or_path = self.__url_or_path
         if rel_path is not None:
@@ -344,78 +383,30 @@ class CommonClient(svn.common_base.CommonBase):
                 do_combine=True)
 
             root = xml.etree.ElementTree.fromstring(raw)
-
-            list_ = root.findall('list/entry')
-            for entry in list_:
-                entry_attr = entry.attrib
-
-                kind = entry_attr['kind']
-                name = entry.find('name').text
-
-                size = entry.find('size')
-
-                # This will be None for directories.
-                if size is not None:
-                    size = int(size.text)
-
-                commit_node = entry.find('commit')
-
-                author = commit_node.find('author').text
-                date = dateutil.parser.parse(commit_node.find('date').text)
-
-                commit_attr = commit_node.attrib
-                revision = int(commit_attr['revision'])
-
-# TODO(dustin): Convert this to a namedtuple in the next version.
-                entry = {
-                    'kind': kind,
-
-                    # To decouple people from the knowledge of the value.
-                    'is_directory': kind == svn.constants.K_DIR,
-
-                    'name': name,
-                    'size': size,
-                    'author': author,
-                    'date': date,
-
-                    # Our approach to normalizing a goofy field-name.
-                    'timestamp': date,
-
-                    'commit_revision': revision,
-                }
-
-                yield entry
+            return self.__iter_list(root.findall('list/entry'))
 
     def list_recursive(self, rel_path=None, yield_dirs=False,
                        path_filter_cb=None):
-        q = [rel_path]
-        while q:
-            current_rel_path = q[0]
-            del q[0]
 
-            for entry in self.list(extended=True, rel_path=current_rel_path):
-                if entry['is_directory'] is True:
-                    if current_rel_path is not None:
-                        next_rel_path = \
-                            os.path.join(current_rel_path, entry['name'])
-                    else:
-                        next_rel_path = entry['name']
+        full_url_or_path = self.__url_or_path
+        if rel_path is not None:
+            full_url_or_path += '/' + rel_path
 
-                    do_queue = True
-                    if path_filter_cb is not None:
-                        result = path_filter_cb(next_rel_path)
-                        if result is False:
-                            do_queue = False
+        raw = self.run_command(
+            'ls',
+            ['--xml', full_url_or_path, '-R'],
+            do_combine=True)
 
-                    if do_queue is True:
-                        q.append(next_rel_path)
+        root = xml.etree.ElementTree.fromstring(raw)
+        for entry in self.__iter_list(root.findall('list/entry')):
+            path = entry['name'].split("/")
+            if len(path) > 1:
+                rel = "/".join(path[0:-1])
+                entry['name'] = path[-1]
+            else:
+                rel = ''
 
-                if entry['is_directory'] is False or yield_dirs is True:
-                    current_rel_path_phrase = current_rel_path \
-                        if current_rel_path is not None \
-                        else ''
-
-                    yield (current_rel_path_phrase, entry)
+            yield (rel, entry)
 
     def diff_summary(self, old, new, rel_path=None):
         """
